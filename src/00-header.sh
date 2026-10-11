@@ -33,7 +33,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 022
 
 # ------------------------------- 常量 ----------------------------------------
-readonly SCRIPT_VERSION="1.3.1"
+readonly SCRIPT_VERSION="6.0.0"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/zhushili/Snell/main/snell.sh"
 readonly DEFAULT_SNELL_VERSION="v6.0.0rc2"
 readonly DOWNLOAD_BASE="https://dl.nssurge.com/snell"

@@ -18,6 +18,18 @@ kv_get() {
         }' "$file"
 }
 
+# 两个文件内容是否相同：优先用 cmp（diffutils），没有时比较 SHA256
+files_equal() {
+    if command -v cmp >/dev/null 2>&1; then
+        cmp -s -- "$1" "$2"
+    else
+        local a b
+        a="$(file_sha256 "$1")" || return 1
+        b="$(file_sha256 "$2")" || return 1
+        [[ "$a" == "$b" ]]
+    fi
+}
+
 is_installed() {
     [[ -x "$BIN_PATH" && -f "$CONF_FILE" ]]
 }

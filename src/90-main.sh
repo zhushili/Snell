@@ -92,6 +92,10 @@ main() {
         usage
         return 0
     fi
+    # -y 与配置选项会切换到非交互模式，菜单无法提问，必须配合命令使用
+    if [[ -z "$COMMAND" || "$COMMAND" == "menu" ]] && (( ASSUME_YES || HAS_CFG_OPTS )); then
+        die "-y 和配置选项需要配合命令使用，例如：bash snell.sh install -y（使用 --help 查看全部命令）"
+    fi
     ensure_root "$@"
     resolve_psk_source
 

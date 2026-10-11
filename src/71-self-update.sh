@@ -26,7 +26,7 @@ cmd_self_update() {
     curl -fsSL --proto '=https' --connect-timeout 5 --max-time 30 -o "$new" "$SCRIPT_URL" 2>/dev/null ||
         die "下载失败（无法访问 GitHub）：${SCRIPT_URL}"
     script_file_valid "$new" || die "下载的脚本不完整或未通过校验，已放弃更新"
-    if cmp -s "$new" "$self"; then
+    if files_equal "$new" "$self"; then
         ok "脚本已是最新版本（${SCRIPT_VERSION}）"
         return 0
     fi

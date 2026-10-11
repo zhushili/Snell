@@ -59,7 +59,7 @@ cmd_update() {
     install_binary "$bin"
     # 重新生成服务文件，让老安装也获得新的安全加固；与新程序一起经过启动检查
     write_service
-    if [[ -n "$bak_svc" ]] && ! cmp -s "$bak_svc" "$SERVICE_FILE"; then
+    if [[ -n "$bak_svc" ]] && ! files_equal "$bak_svc" "$SERVICE_FILE"; then
         info "systemd 服务文件已按新版本重新生成（旧文件已备份：${bak_svc}）"
     fi
 

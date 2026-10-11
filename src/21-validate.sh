@@ -55,9 +55,62 @@ version_compare() {
     fi
 }
 
+is_valid_ipv4() {
+    local re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$' i
+    [[ "$1" =~ $re ]] || return 1
+    for i in 1 2 3 4; do
+        (( 10#${BASH_REMATCH[$i]} <= 255 )) || return 1
+    done
+}
+
+# IPv6：各段 1-4 位十六进制，最多一个 ::，末尾可为 IPv4（如 ::ffff:1.2.3.4）
+is_valid_ipv6() {
+    local a="$1" v4="" groups g n max=8
+    [[ "$a" == *:* && "$a" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+    if [[ "$a" == *.* ]]; then
+        v4="${a##*:}"
+        is_valid_ipv4 "$v4" || return 1
+        a="${a%"$v4"}"
+        [[ "$a" == *: ]] || return 1
+        [[ "$a" == *:: ]] || a="${a%:}"
+        max=6
+    fi
+    [[ "$a" != *:::* ]] || return 1
+    case "$a" in
+        *::*::*) return 1 ;;
+        *::*)
+            groups="${a/::/:}"; groups="${groups#:}"; groups="${groups%:}"
+            ;;
+        *)
+            [[ "$a" != :* && "$a" != *: ]] || return 1
+            groups="$a"
+            ;;
+    esac
+    if [[ -n "$groups" ]]; then
+        local -a parts
+        IFS=: read -r -a parts <<<"$groups"
+        n=${#parts[@]}
+        for g in "${parts[@]}"; do
+            [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        done
+    else
+        n=0
+    fi
+    if [[ "$a" == *::* ]]; then (( n < max )); else (( n == max )); fi
+}
+
+# 逗号分隔的 IP 列表，每一项须为合法 IPv4 / IPv6（允许逗号两侧有空格）
 is_valid_dns_list() {
-    local re='^[0-9A-Fa-f.:, ]+$'
-    [[ "$1" =~ $re ]]
+    local item
+    local -a items
+    [[ -n "$1" && "$1" != *, && "$1" != ,* ]] || return 1
+    IFS=, read -r -a items <<<"$1"
+    (( ${#items[@]} > 0 )) || return 1
+    for item in "${items[@]}"; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        is_valid_ipv4 "$item" || is_valid_ipv6 "$item" || return 1
+    done
 }
 
 # 归一化布尔 / auto 输入

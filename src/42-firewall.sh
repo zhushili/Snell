@@ -13,6 +13,77 @@ iptables_restrictive() {
     ipt_chain_restrictive iptables || ipt_chain_restrictive ip6tables
 }
 
+# ---- nftables（直接用 nft 管理、不经 ufw / firewalld / iptables 的规则集）----
+# 列出需要放行的 input 基础链，每行"<family> <table> <chain>"：
+# 默认策略为 drop，或链中有 drop / reject 规则。跳过 firewalld 与 iptables-nft 管理的表
+nft_restrictive_chains() {
+    command -v nft >/dev/null 2>&1 || return 0
+    nft list ruleset 2>/dev/null | awk '
+        /^table / { fam = $2; tbl = $3; next }
+        /^\tchain / { chain = $2; input = 0; restrictive = 0; next }
+        /^\t\ttype filter hook input / { input = 1; if ($0 ~ /policy drop;/) restrictive = 1; next }
+        /^\t\t/ { if ($0 ~ /(^|[ \t])(drop|reject)([ \t]|$)/) restrictive = 1; next }
+        /^\t}/ {
+            managed = (tbl == "firewalld") || ((fam == "ip" || fam == "ip6") && tbl == "filter" && chain == "INPUT")
+            if (input && restrictive && !managed) print fam, tbl, chain
+            chain = ""
+        }'
+}
+
+nft_restrictive() {
+    [[ -n "$(nft_restrictive_chains)" ]]
+}
+
+# 输出放行规则的插入位置（规则 handle）：第一条兜底 drop / reject（无任何匹配条件）之前；
+# 没有兜底规则时输出空，表示追加到链尾
+nft_insert_handle() {
+    nft -a list chain "$1" "$2" "$3" 2>/dev/null | awk '
+        /^\t\t/ && /# handle [0-9]+$/ {
+            rule = $0; sub(/^[ \t]+/, "", rule); sub(/ # handle [0-9]+$/, "", rule)
+            gsub(/counter( packets [0-9]+ bytes [0-9]+)? ?/, "", rule)
+            if (rule ~ /^(drop|reject( with .*)?)$/) { print $NF; exit }
+        }'
+}
+
+# 输出链中本脚本为该端口添加的规则 handle
+nft_own_handles() {
+    local port="$1" fam="$2" tbl="$3" chain="$4"
+    nft -a list chain "$fam" "$tbl" "$chain" 2>/dev/null |
+        awk -v p="tcp dport ${port} accept comment \"${FW_COMMENT}\"" 'index($0, p) && /# handle [0-9]+$/ { print $NF }'
+}
+
+# nft_rule add|del <端口>
+nft_rule() {
+    local action="$1" port="$2" fam tbl chain pos h ok=0
+    local -a rule=(tcp dport "$port" accept comment "\"${FW_COMMENT}\"")
+    if [[ "$action" == "add" ]]; then
+        while read -r fam tbl chain; do
+            [[ -n "$chain" ]] || continue
+            # ip6 表只在开启 IPv6 时放行；ip 与 inet 表总是放行
+            [[ "$fam" == "ip6" && "$CFG_IPV6" != "true" ]] && continue
+            [[ -n "$(nft_own_handles "$port" "$fam" "$tbl" "$chain")" ]] && { ok=1; continue; }
+            pos="$(nft_insert_handle "$fam" "$tbl" "$chain")"
+            if [[ -n "$pos" ]]; then
+                nft insert rule "$fam" "$tbl" "$chain" position "$pos" "${rule[@]}" || return 1
+            else
+                nft add rule "$fam" "$tbl" "$chain" "${rule[@]}" || return 1
+            fi
+            ok=1
+        done < <(nft_restrictive_chains)
+        (( ok ))
+    else
+        # 删除时遍历所有 input 链（链的限制状态可能已变化）
+        while read -r fam tbl chain; do
+            for h in $(nft_own_handles "$port" "$fam" "$tbl" "$chain"); do
+                nft delete rule "$fam" "$tbl" "$chain" handle "$h" || true
+            done
+        done < <(nft list ruleset 2>/dev/null | awk '
+            /^table / { fam = $2; tbl = $3 }
+            /^\tchain / { chain = $2 }
+            /^\t\ttype filter hook input / { print fam, tbl, chain }')
+    fi
+}
+
 detect_firewall() {
     local st
     if command -v ufw >/dev/null 2>&1; then
@@ -24,6 +95,9 @@ detect_firewall() {
     fi
     if iptables_restrictive; then
         echo "iptables"; return
+    fi
+    if nft_restrictive; then
+        echo "nftables"; return
     fi
     echo "none"
 }
@@ -146,6 +220,16 @@ fw_open() {
             iptables_persist
             added="rule"
             ;;
+        nftables)
+            # 只修改运行中的规则集，不改写 /etc/nftables.conf（用户的配置文件可能包含 include / 变量）
+            if nft_rule add "$port"; then
+                added="rule"
+                warn "nftables 规则只在运行时生效，重启后会丢失；请在 /etc/nftables.conf 对应的 input 链中加入："
+                warn "  tcp dport ${port} accept"
+            else
+                warn "nftables 放行端口失败，请手动放行 TCP ${port}"
+            fi
+            ;;
         none) ;;
     esac
     echo "$fw $added"
@@ -194,6 +278,10 @@ fw_close() {
             iptables_persist
             info "已移除 iptables 中 TCP ${port} 的放行规则" >&2
             ;;
+        nftables)
+            nft_rule del "$port"
+            info "已移除 nftables 中 TCP ${port} 的放行规则（如已写入 /etc/nftables.conf，请手动删除）" >&2
+            ;;
         *) ;;
     esac
     return 0
@@ -210,7 +298,7 @@ fw_resync() {
 report_firewall() {
     local fw="$1" port="$2" added="${3:-}"
     case "$fw" in
-        none) info "未检测到启用中的 ufw / firewalld / 限制性 iptables 规则，无需放行" ;;
+        none) info "未检测到启用中的 ufw / firewalld / 限制性 iptables 或 nftables 规则，无需放行" ;;
         *)
             if [[ "$added" == "-" ]]; then
                 ok "${fw} 中已有 TCP 端口 ${port} 的放行规则，沿用原有规则"

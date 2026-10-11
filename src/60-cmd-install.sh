@@ -89,6 +89,7 @@ cmd_install() {
     info "启动 Snell 服务..."
     service_start_verify "$CFG_PORT" || die "服务启动失败，请根据上方日志排查（配置与程序均已保留）"
     ok "Snell 服务已启动并设为开机自启"
+    prune_backups
 
     show_info
 }
