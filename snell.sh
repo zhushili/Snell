@@ -485,8 +485,8 @@ verify_elf() {
 # 新增版本时，用两个不同网络下载同一文件并核对哈希一致后再写入
 known_sha256() {
     case "$1-$2" in
-        # v6.0.0rc2-amd64)   echo "<64 位十六进制 SHA256>" ;;
-        # v6.0.0rc2-aarch64) echo "<64 位十六进制 SHA256>" ;;
+        v6.0.0rc2-amd64)   echo "8a9c4463ca87cfa5eaa37c6af0d37ab93ea275aa12391985bb2a375ca3abd7f2" ;;
+        v6.0.0rc2-aarch64) echo "a0b2915cbc77dc3baf8fa069e741c20808d8a10c3a8a93e709a0a580645c3bd7" ;;
         *) return 1 ;;
     esac
 }
