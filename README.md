@@ -74,6 +74,17 @@ sudo bash snell.sh uninstall
 
 </details>
 
+## 开发
+
+`snell.sh` 由 `src/` 下的模块合并生成，一键安装和 `self-update` 仍然只需要这一个文件。修改代码时请编辑 `src/`，然后运行：
+
+```bash
+./build.sh            # 重新生成 snell.sh
+./build.sh --check    # 检查 snell.sh 是否与 src/ 一致（CI 中也会运行）
+```
+
+模块按文件名顺序合并：`00-header`（常量与变量）、`1x` 输出与交互、`2x` 校验、`3x` 环境检测与通用工具、`4x` 下载 / 服务 / 防火墙、`5x` 参数收集与信息输出、`6x` 各子命令、`70` 帮助、`71` 脚本自更新、`80` 菜单、`90` 入口。
+
 ## 参考
 
 [Snell 发布说明](https://kb.nssurge.com/surge-knowledge-base/release-notes/snell) · [Surge 手册：Snell](https://manual.nssurge.com/policies/snell.html) · 社区脚本，与 Surge 官方无关 · [MIT](LICENSE)

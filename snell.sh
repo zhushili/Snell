@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 此文件由 build.sh 从 src/ 下的模块生成，请修改 src/ 后运行 ./build.sh，不要直接编辑
 # =============================================================================
 #  Snell v6 服务端一键安装 / 管理脚本
 #  项目主页 : https://github.com/zhushili/Snell（MIT License）
@@ -1251,7 +1252,7 @@ show_info() {
     echo "${C_BOLD}==========================================================${C_RESET}"
 }
 
-# ------------------------------- 命令实现 ------------------------------------
+# ------------------------------- 命令：install --------------------------------
 cmd_install() {
     preflight
     is_valid_version "$SNELL_VERSION" || die "版本号格式无效或不是 v6：${SNELL_VERSION}"
@@ -1345,6 +1346,7 @@ cmd_install() {
     show_info
 }
 
+# ------------------------------- 命令：update ---------------------------------
 # 目标版本是脚本内置的默认版本时，提示官方可能已发布更新的版本
 hint_newer_version() {
     [[ "$SNELL_VERSION" == "$DEFAULT_SNELL_VERSION" ]] || return 0
@@ -1431,6 +1433,7 @@ cmd_update() {
     die "更新失败且回滚后仍无法启动，请查看日志：journalctl -u ${SERVICE_NAME} -n 100"
 }
 
+# ------------------------------- 命令：uninstall ------------------------------
 cmd_uninstall() {
     check_root
     check_systemd
@@ -1485,15 +1488,7 @@ cmd_uninstall() {
     ok "Snell 已卸载"
 }
 
-cmd_show() {
-    check_root
-    require_installed
-    show_info
-    echo
-    info "配置文件内容（${CONF_FILE}）："
-    sed 's/^/    /' "$CONF_FILE"
-}
-
+# ------------------------------- 命令：config ---------------------------------
 cmd_config() {
     check_root
     check_systemd
@@ -1606,6 +1601,16 @@ cmd_config() {
     die "恢复原配置后仍无法启动，请查看日志：journalctl -u ${SERVICE_NAME} -n 100"
 }
 
+# ------------------------------- 命令：show / log / restart / status ----------
+cmd_show() {
+    check_root
+    require_installed
+    show_info
+    echo
+    info "配置文件内容（${CONF_FILE}）："
+    sed 's/^/    /' "$CONF_FILE"
+}
+
 cmd_log() {
     check_root
     if (( OPT_FOLLOW )); then
@@ -1636,6 +1641,7 @@ cmd_status() {
     systemctl status "$SERVICE_NAME" --no-pager || true
 }
 
+# ------------------------------- 帮助 -----------------------------------------
 usage() {
     cat <<EOF
 Snell v6 服务端管理脚本 ${SCRIPT_VERSION}（默认 Snell 版本 ${DEFAULT_SNELL_VERSION}）
@@ -1802,6 +1808,7 @@ show_menu() {
     done
 }
 
+# ------------------------------- 加锁 / 参数解析 / 入口 -----------------------
 # 对会修改系统的操作加锁，防止多个实例同时运行；系统没有 flock 时跳过加锁
 acquire_lock() {
     command -v flock >/dev/null 2>&1 || return 0
@@ -1812,7 +1819,6 @@ acquire_lock() {
     flock -n 9 || die "另一个 snell.sh 实例正在运行，请等待其结束后再试"
 }
 
-# ------------------------------- 参数解析 / 入口 -----------------------------
 need_arg() {
     [[ $# -ge 2 && -n "$2" ]] || die "选项 $1 需要一个值"
 }
