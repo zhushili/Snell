@@ -66,6 +66,8 @@ sudo bash snell.sh uninstall
 
 **更安全地传入 PSK**：`--psk` 会留在 shell 历史和进程列表里，建议用 `--psk-file /root/snell.psk`（读取第一行）或环境变量 `SNELL_PSK`。优先级：`--psk` > `--psk-file` > `SNELL_PSK`。
 
+**完整性校验**：下载的压缩包会与脚本内置的 SHA256 比对，不一致时中止安装。用 `--snell-version` 指定脚本未收录的版本时只会警告并打印实际哈希，可用 `--sha256 <哈希>`（或环境变量 `SNELL_SHA256`）指定期望值。
+
 **安装的文件**：`/usr/local/bin/snell-server`、`/etc/snell/snell-server.conf`（root:snell 0640）、`/etc/systemd/system/snell.service`、`/var/backups/snell/`（每类保留最近 3 份备份）。
 
 **进不去菜单**：非 root 且无法自动 sudo 时，改用 `sudo bash snell.sh`；没有终端时（cron、CI）请直接指定命令，如 `install -y`；出现 `$'\r': command not found` 说明文件被存成了 Windows 换行，请在服务器上重新用 `curl` 下载。
