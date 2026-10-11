@@ -32,10 +32,11 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 022
 
 # ------------------------------- 常量 ----------------------------------------
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/zhushili/Snell/main/snell.sh"
 readonly DEFAULT_SNELL_VERSION="v6.0.0rc2"
 readonly DOWNLOAD_BASE="https://dl.nssurge.com/snell"
+readonly RELEASE_NOTES_URL="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell"
 
 readonly BIN_PATH="/usr/local/bin/snell-server"
 readonly CONF_DIR="/etc/snell"
@@ -601,7 +602,7 @@ write_service() {
 # 由 snell.sh ${SCRIPT_VERSION} 生成
 [Unit]
 Description=Snell Proxy Server (v6)
-Documentation=https://kb.nssurge.com/surge-knowledge-base/release-notes/snell
+Documentation=${RELEASE_NOTES_URL}
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -1192,6 +1193,14 @@ cmd_install() {
     show_info
 }
 
+# 目标版本是脚本内置的默认版本时，提示官方可能已发布更新的版本
+hint_newer_version() {
+    [[ "$SNELL_VERSION" == "$DEFAULT_SNELL_VERSION" ]] || return 0
+    info "目标版本为本脚本内置的默认版本 ${DEFAULT_SNELL_VERSION}，官方可能已发布更新的版本"
+    info "请查看发布说明：${RELEASE_NOTES_URL}"
+    info "如需更新到其他版本：bash snell.sh update --snell-version <版本号>（例如 v6.0.0）"
+}
+
 cmd_update() {
     check_root
     check_systemd
@@ -1207,6 +1216,7 @@ cmd_update() {
     cur="$(installed_version)"
     load_config
     info "当前版本：${cur}，目标版本：${SNELL_VERSION}"
+    hint_newer_version
     if [[ "$cur" == "$SNELL_VERSION" ]]; then
         if ! ask_yes_no "已是目标版本，是否仍然重新安装？" n; then
             info "无需更新"
