@@ -71,6 +71,7 @@ OPT_DNS_PREF=""
 OPT_IPV6=""
 OPT_EGRESS=""
 OPT_DNS=""
+OPT_SHA256="${SNELL_SHA256:-}"
 OPT_NAME="Snell-v6"
 OPT_FOLLOW=0
 OPT_LINES=100
@@ -480,6 +481,54 @@ verify_elf() {
     fi
 }
 
+# 内置的官方压缩包 SHA256：known_sha256 <版本> <架构>，未收录时返回非 0
+# 新增版本时，用两个不同网络下载同一文件并核对哈希一致后再写入
+known_sha256() {
+    case "$1-$2" in
+        # v6.0.0rc2-amd64)   echo "<64 位十六进制 SHA256>" ;;
+        # v6.0.0rc2-aarch64) echo "<64 位十六进制 SHA256>" ;;
+        *) return 1 ;;
+    esac
+}
+
+file_sha256() {
+    local f="$1" out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out="$(sha256sum -- "$f")" || return 1
+    elif command -v openssl >/dev/null 2>&1; then
+        out="$(openssl dgst -sha256 -r "$f")" || return 1
+    else
+        return 1
+    fi
+    printf '%s' "${out%% *}"
+}
+
+# 校验压缩包 SHA256：优先使用 --sha256 / SNELL_SHA256，其次使用内置值；
+# 不匹配时中止；两者都没有时警告并打印实际哈希，供用户自行核对
+verify_sha256() {
+    local f="$1" version="$2" expect actual source
+    actual="$(file_sha256 "$f")" || die "无法计算 SHA256（缺少 sha256sum 与 openssl）"
+    actual="$(to_lower "$actual")"
+    if [[ -n "$OPT_SHA256" ]]; then
+        expect="$OPT_SHA256" source="--sha256"
+    elif expect="$(known_sha256 "$version" "$ARCH")"; then
+        source="脚本内置"
+    else
+        warn "脚本未收录 ${version}（${ARCH}）的 SHA256，无法校验文件完整性"
+        warn "本次下载的 SHA256：${actual}"
+        warn "如需校验，请用 --sha256 指定官方或可信来源提供的哈希"
+        return 0
+    fi
+    expect="$(to_lower "$expect")"
+    if [[ "$actual" != "$expect" ]]; then
+        rm -f -- "$f"
+        error "期望（${source}）：${expect}"
+        error "实际：            ${actual}"
+        die "SHA256 校验失败，文件可能被篡改或下载不完整，已中止"
+    fi
+    ok "SHA256 校验通过（${source}）" >&2
+}
+
 # 下载并解压指定版本，成功后输出二进制路径
 fetch_binary() {
     local version="$1" url zip dir bin
@@ -493,6 +542,7 @@ fetch_binary() {
             -sS -o "$zip" "$url"; then
         die "下载失败：${url}（请检查网络，或确认版本号 ${version} 是否存在）"
     fi
+    verify_sha256 "$zip" "$version"
     unzip -tq "$zip" >/dev/null 2>&1 || die "压缩包校验失败（文件可能损坏或下载不完整）"
     rm -rf -- "$dir" || die "无法清理解压目录：${dir}"
     mkdir -p "$dir" || die "无法创建解压目录：${dir}"
@@ -1504,6 +1554,8 @@ Snell v6 服务端管理脚本 ${SCRIPT_VERSION}（默认 Snell 版本 ${DEFAULT
 
 其他选项:
   --snell-version V            指定 Snell 版本（默认 ${DEFAULT_SNELL_VERSION}，也可用环境变量 SNELL_VERSION）
+  --sha256 HEX                 校验下载压缩包的 SHA256（也可用环境变量 SNELL_SHA256；
+                               未指定时使用脚本内置值，未收录的版本只警告）
   --name NAME                  Surge 配置行中的节点名（默认 ${OPT_NAME}）
   -y, --yes                    自动确认（覆盖配置 / 卸载 / unsafe-raw）
   -f, --follow                 log 命令实时跟踪
@@ -1687,6 +1739,7 @@ parse_args() {
             --bbr|--no-bbr)       # 已删除的选项：提示后忽略（仍按配置参数处理，保持原来的非交互行为）
                                   info "BBR 已移出本脚本，已忽略 $1"; HAS_CFG_OPTS=1 ;;
             --snell-version)      need_arg "$@"; SNELL_VERSION="$2"; shift ;;
+            --sha256)             need_arg "$@"; OPT_SHA256="$2"; shift ;;
             --name)               need_arg "$@"; OPT_NAME="$2"; shift ;;
             -y|--yes)             ASSUME_YES=1 ;;
             --no-update-check)    ;;   # 已删除的选项，为兼容旧脚本 / alias 静默忽略
@@ -1699,6 +1752,9 @@ parse_args() {
     done
     [[ "$OPT_LINES" =~ ^[0-9]+$ ]] || die "--lines 需要为数字"
     [[ "$OPT_NAME" =~ ^[^,=]+$ ]] || die "--name 不能包含逗号或等号"
+    if [[ -n "$OPT_SHA256" && ! "$OPT_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+        die "--sha256 需要为 64 位十六进制字符串"
+    fi
 }
 
 # 非 root 运行时：脚本是磁盘上的文件且有 sudo，则自动通过 sudo 重新执行
@@ -1714,7 +1770,7 @@ ensure_root() {
             printf '%s\n' "$SNELL_PSK" >"$psk_tmp" || die "无法写入临时文件：${psk_tmp}"
         fi
         info "需要 root 权限，正在通过 sudo 重新运行..."
-        exec sudo -- env SNELL_VERSION="$SNELL_VERSION" SNELL_PSK_TMPFILE="$psk_tmp" bash "$self" "$@"
+        exec sudo -- env SNELL_VERSION="$SNELL_VERSION" SNELL_SHA256="$OPT_SHA256" SNELL_PSK_TMPFILE="$psk_tmp" bash "$self" "$@"
     fi
     die "请使用 root 用户运行本脚本（例如：sudo bash snell.sh）"
 }
