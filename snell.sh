@@ -668,13 +668,15 @@ service_start_verify() {
     return 1
 }
 
+# save_meta <防火墙后端> <本脚本新增的放行规则，见 fw_open>
 save_meta() {
-    local fw="$1"
+    local fw="$1" added="${2:--}"
     mkdir -p "$CONF_DIR"
     {
         echo "VERSION=${SNELL_VERSION}"
         echo "PORT=${CFG_PORT}"
         echo "FIREWALL=${fw}"
+        echo "FW_ADDED=${added}"
         echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
         echo "UPDATED_AT=$(date '+%F %T')"
     } >"$META_FILE"
@@ -747,6 +749,13 @@ meta_firewall() {
     echo "$fw"
 }
 
+# 安装记录中本脚本新增的放行规则；旧版 meta 没有该字段时输出 ?（未知）
+meta_fw_added() {
+    local added
+    added="$(kv_get "$META_FILE" FW_ADDED)"
+    echo "${added:-?}"
+}
+
 # 仅支持 netfilter-persistent 持久化；没有时提示规则重启后会丢失
 iptables_persist() {
     if command -v netfilter-persistent >/dev/null 2>&1; then
@@ -756,32 +765,89 @@ iptables_persist() {
     fi
 }
 
+# 输出放行规则在 INPUT 链中的插入位置（规则序号）：第一条"兜底"拒绝规则
+# （不限来源、端口的 DROP / REJECT）之前；没有兜底规则时输出空，表示追加到链尾。
+# 这样放行规则排在用户的封禁规则（按 IP 拒绝、fail2ban 等）之后，不会绕过它们
+ipt_insert_pos() {
+    local bin="$1" line n=0
+    local re='^-A INPUT( -p (tcp|all))? -j (DROP|REJECT)( --reject-with [a-z0-9-]+)?$'
+    while IFS= read -r line; do
+        [[ "$line" == "-A INPUT "* ]] || continue
+        n=$((n + 1))
+        if [[ "$line" =~ $re ]]; then
+            echo "$n"
+            return 0
+        fi
+    done < <("$bin" -S INPUT 2>/dev/null)
+}
+
 # ipt_rule add|del <端口> <iptables|ip6tables>
+# 规则带 snell-server 注释，删除时只会匹配本脚本添加的规则
 ipt_rule() {
-    local action="$1" port="$2" bin="$3"
+    local action="$1" port="$2" bin="$3" pos
     command -v "$bin" >/dev/null 2>&1 || return 0
-    local -a rule=(INPUT -p tcp --dport "$port" -m comment --comment "$FW_COMMENT" -j ACCEPT)
+    local -a rule=(-p tcp --dport "$port" -m comment --comment "$FW_COMMENT" -j ACCEPT)
     if [[ "$action" == "add" ]]; then
-        "$bin" -C "${rule[@]}" 2>/dev/null || "$bin" -I "${rule[@]}"
+        "$bin" -C INPUT "${rule[@]}" 2>/dev/null && return 0
+        pos="$(ipt_insert_pos "$bin")"
+        if [[ -n "$pos" ]]; then
+            "$bin" -I INPUT "$pos" "${rule[@]}"
+        else
+            "$bin" -A INPUT "${rule[@]}"
+        fi
     else
-        while "$bin" -C "${rule[@]}" 2>/dev/null; do "$bin" -D "${rule[@]}"; done
+        while "$bin" -C INPUT "${rule[@]}" 2>/dev/null; do "$bin" -D INPUT "${rule[@]}"; done
     fi
 }
 
-# 放行端口，输出实际使用的防火墙后端
+# ufw 中是否已有放行该端口 TCP 的规则（含不限协议的规则）
+ufw_has_rule() {
+    local port="$1"
+    ufw show added 2>/dev/null | grep -Eq "^ufw allow ${port}(/tcp)?( |\$)"
+}
+
+# ufw 中是否有本脚本添加（带 snell-server 注释）的规则
+ufw_has_own_rule() {
+    local port="$1"
+    ufw show added 2>/dev/null | grep -Fxq "ufw allow ${port}/tcp comment '${FW_COMMENT}'"
+}
+
+# 放行端口，输出"<防火墙后端> <本脚本新增的规则>"，例如 "ufw rule"、"firewalld runtime,permanent"。
+# 端口原本就已放行时不重复添加，新增部分记为 -；卸载 / 改端口时只移除新增的部分
 fw_open() {
-    local port="$1" fw
+    local port="$1" fw added="-" fd=""
     fw="$(detect_firewall)"
     case "$fw" in
         ufw)
-            ufw allow "${port}/tcp" comment "$FW_COMMENT" >/dev/null || warn "ufw 放行端口失败"
+            if ufw_has_rule "$port"; then
+                # 本脚本之前加的规则仍算作自己的；用户原有的规则保持不动
+                ufw_has_own_rule "$port" && added="rule"
+            elif ufw allow "${port}/tcp" comment "$FW_COMMENT" >/dev/null; then
+                added="rule"
+            else
+                warn "ufw 放行端口失败"
+            fi
             ;;
         firewalld)
-            { firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null &&
-              firewall-cmd --reload >/dev/null; } || warn "firewalld 放行端口失败"
+            # 运行时与永久配置分别添加，不执行 --reload（reload 会丢弃用户的运行时规则）
+            if ! firewall-cmd --query-port="${port}/tcp" >/dev/null 2>&1; then
+                if firewall-cmd --add-port="${port}/tcp" >/dev/null; then
+                    fd="runtime"
+                else
+                    warn "firewalld 放行端口（运行时）失败"
+                fi
+            fi
+            if ! firewall-cmd --permanent --query-port="${port}/tcp" >/dev/null 2>&1; then
+                if firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null; then
+                    fd="${fd:+${fd},}permanent"
+                else
+                    warn "firewalld 放行端口（永久）失败"
+                fi
+            fi
+            added="${fd:--}"
             ;;
         iptables)
-            # 只在对应 INPUT 链已有 DROP/REJECT（含默认 DROP）时才插入放行规则
+            # 只在对应 INPUT 链已有 DROP/REJECT（含默认 DROP）时才添加放行规则
             if ipt_chain_restrictive iptables; then
                 ipt_rule add "$port" iptables || warn "iptables 放行端口失败"
             fi
@@ -789,46 +855,80 @@ fw_open() {
                 ipt_rule add "$port" ip6tables || warn "ip6tables 放行端口失败"
             fi
             iptables_persist
+            added="rule"
             ;;
         none) ;;
     esac
-    echo "$fw"
+    echo "$fw $added"
 }
 
+# fw_close <端口> <防火墙后端> <本脚本新增的规则>：只移除本脚本添加的放行规则（提示输出到 stderr）
 fw_close() {
-    local port="$1" fw="$2"
+    local port="$1" fw="$2" added="${3:-?}"
     [[ -z "$port" ]] && return 0
     case "$fw" in
         ufw)
-            ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+            # 旧版本安装未记录时，按注释识别是否为本脚本添加
+            if [[ "$added" == "?" ]] && ufw_has_own_rule "$port"; then
+                added="rule"
+            fi
+            if [[ "$added" == *rule* ]]; then
+                ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+                info "已移除 ufw 中 TCP ${port} 的放行规则" >&2
+            elif ufw_has_rule "$port"; then
+                info "ufw 中 TCP ${port} 的放行规则不是本脚本添加的，已保留" >&2
+            fi
             ;;
         firewalld)
-            { firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 &&
-              firewall-cmd --reload >/dev/null 2>&1; } || true
+            if [[ "$added" == "?" ]]; then
+                if firewall-cmd --permanent --query-port="${port}/tcp" >/dev/null 2>&1; then
+                    warn "无法确认 firewalld 中 TCP ${port} 的放行规则是否由本脚本添加，已保留；如不再需要请手动移除："
+                    warn "  firewall-cmd --remove-port=${port}/tcp && firewall-cmd --permanent --remove-port=${port}/tcp"
+                fi
+                return 0
+            fi
+            if [[ "$added" == *runtime* ]]; then
+                firewall-cmd --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+            fi
+            if [[ "$added" == *permanent* ]]; then
+                firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+            fi
+            if [[ "$added" == "-" ]]; then
+                info "firewalld 中 TCP ${port} 的放行规则不是本脚本添加的，已保留" >&2
+            else
+                info "已移除 firewalld 中 TCP ${port} 的放行规则" >&2
+            fi
             ;;
         iptables)
             ipt_rule del "$port" iptables || true
             ipt_rule del "$port" ip6tables || true
             iptables_persist
+            info "已移除 iptables 中 TCP ${port} 的放行规则" >&2
             ;;
         *) ;;
     esac
     return 0
 }
 
-# 按当前 CFG_PORT / CFG_IPV6 重新同步放行规则：先移除旧端口的规则（含 ip6tables），
-# 再按当前配置放行；输出实际使用的防火墙后端
+# 按当前 CFG_PORT / CFG_IPV6 重新同步放行规则：先移除旧端口上本脚本添加的规则（含 ip6tables），
+# 再按当前配置放行；输出同 fw_open
 fw_resync() {
-    local old_port="$1" old_fw="$2"
-    fw_close "$old_port" "$old_fw"
+    local old_port="$1" old_fw="$2" old_added="$3"
+    fw_close "$old_port" "$old_fw" "$old_added"
     fw_open "$CFG_PORT"
 }
 
 report_firewall() {
-    local fw="$1" port="$2"
+    local fw="$1" port="$2" added="${3:-}"
     case "$fw" in
         none) info "未检测到启用中的 ufw / firewalld / 限制性 iptables 规则，无需放行" ;;
-        *)    ok "已通过 ${fw} 放行 TCP 端口 ${port}" ;;
+        *)
+            if [[ "$added" == "-" ]]; then
+                ok "${fw} 中已有 TCP 端口 ${port} 的放行规则，沿用原有规则"
+            else
+                ok "已通过 ${fw} 放行 TCP 端口 ${port}"
+            fi
+            ;;
     esac
     warn "如使用云服务器，请同时在云厂商控制台的安全组中放行 TCP ${port}"
 }
@@ -1106,9 +1206,10 @@ cmd_install() {
     preflight
     is_valid_version "$SNELL_VERSION" || die "版本号格式无效或不是 v6：${SNELL_VERSION}"
 
-    local keep_config=0 bin fw old_obfs bak old_port old_fw
+    local keep_config=0 bin fw fw_added fw_out old_obfs bak old_port old_fw old_added
     old_port="$(kv_get "$META_FILE" PORT)"
     old_fw="$(meta_firewall)"
+    old_added="$(meta_fw_added)"
     if [[ -f "$CONF_FILE" ]]; then
         warn "检测到已有配置文件：${CONF_FILE}"
         if (( INTERACTIVE )); then
@@ -1178,13 +1279,14 @@ cmd_install() {
     write_service
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || die "设置开机自启失败"
 
-    # 覆盖安装且端口变化时，移除旧端口的放行规则
-    if [[ -n "$old_port" && "$old_port" != "$CFG_PORT" ]]; then
-        fw_close "$old_port" "$old_fw"
+    # 覆盖安装时先移除旧端口上本脚本添加的规则，再按新配置放行
+    if [[ -n "$old_port" ]]; then
+        fw_close "$old_port" "$old_fw" "$old_added"
     fi
-    fw="$(fw_open "$CFG_PORT")" || die "配置防火墙放行规则失败"
-    report_firewall "$fw" "$CFG_PORT"
-    save_meta "$fw"
+    fw_out="$(fw_open "$CFG_PORT")" || die "配置防火墙放行规则失败"
+    read -r fw fw_added <<<"$fw_out"
+    report_firewall "$fw" "$CFG_PORT" "$fw_added"
+    save_meta "$fw" "$fw_added"
 
     info "启动 Snell 服务..."
     service_start_verify "$CFG_PORT" || die "服务启动失败，请根据上方日志排查（配置与程序均已保留）"
@@ -1258,7 +1360,7 @@ cmd_update() {
 
     if service_start_verify "$CFG_PORT"; then
         fw="$(meta_firewall)"
-        save_meta "$fw"
+        save_meta "$fw" "$(meta_fw_added)"
         prune_backups
         ok "已更新到 ${SNELL_VERSION}，配置保持不变"
         warn "请确认 Surge 客户端也已更新到与 ${SNELL_VERSION} 兼容的版本"
@@ -1298,9 +1400,10 @@ cmd_uninstall() {
     fi
     ask_yes_no "确认卸载？" n || { info "已取消"; return 0; }
 
-    local port fw
+    local port fw added
     port="$(kv_get "$META_FILE" PORT)"
     fw="$(meta_firewall)"
+    added="$(meta_fw_added)"
     [[ -z "$port" ]] && port="$(current_conf_port)"
 
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
@@ -1309,10 +1412,7 @@ cmd_uninstall() {
     systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
 
     if [[ -n "$port" ]]; then
-        fw_close "$port" "${fw:-none}"
-        if [[ "${fw:-none}" != "none" ]]; then
-            info "已移除 ${fw} 中 TCP ${port} 的放行规则"
-        fi
+        fw_close "$port" "${fw:-none}" "$added"
     fi
 
     rm -f -- "$BIN_PATH" "${BIN_PATH}.new"
@@ -1351,7 +1451,7 @@ cmd_config() {
     load_config
 
     local old_port="$CFG_PORT" old_egress="$CFG_EGRESS" old_ipv6="$CFG_IPV6"
-    local new_port new_ipv6 before after bak fw old_fw choice ans
+    local new_port new_ipv6 before after bak fw fw_added fw_out old_fw old_added choice ans
     before="$(printf '%s|' "$CFG_PORT" "$CFG_PSK" "$CFG_MODE" "$CFG_IPV6" "$CFG_DNS_PREF" "$CFG_EGRESS" "$CFG_DNS")"
 
     if (( INTERACTIVE )); then
@@ -1422,14 +1522,16 @@ cmd_config() {
 
     # 端口或 IPv6 任一变化都要同步放行规则（iptables 后端需增删 ip6tables 规则）
     old_fw="$(meta_firewall)"
-    fw="$old_fw"
+    old_added="$(meta_fw_added)"
+    fw="$old_fw" fw_added="$old_added"
     if [[ "$CFG_PORT" != "$old_port" || "$CFG_IPV6" != "$old_ipv6" ]]; then
-        fw="$(fw_resync "$old_port" "$old_fw")" || die "配置防火墙放行规则失败"
-        report_firewall "$fw" "$CFG_PORT"
+        fw_out="$(fw_resync "$old_port" "$old_fw" "$old_added")" || die "配置防火墙放行规则失败"
+        read -r fw fw_added <<<"$fw_out"
+        report_firewall "$fw" "$CFG_PORT" "$fw_added"
     fi
 
     if service_start_verify "$CFG_PORT"; then
-        save_meta "$fw"
+        save_meta "$fw" "$fw_added"
         prune_backups
         ok "配置已更新并重启服务"
         warn "请同步修改 Surge 客户端配置（端口 / PSK / mode 需与服务端一致）"
@@ -1446,7 +1548,7 @@ cmd_config() {
     load_config
     write_service
     if [[ "$new_port" != "$old_port" || "$new_ipv6" != "$old_ipv6" ]]; then
-        fw_resync "$new_port" "$fw" >/dev/null || warn "恢复防火墙规则失败，请手动检查端口 ${old_port} 的放行规则"
+        fw_resync "$new_port" "$fw" "$fw_added" >/dev/null || warn "恢复防火墙规则失败，请手动检查端口 ${old_port} 的放行规则"
     fi
     if service_start_verify "$CFG_PORT"; then
         die "已恢复原配置，服务运行正常"
